@@ -310,9 +310,9 @@ def train_model():
 
     model.train(
         data=data_yaml_path,
-        epochs=50,
-        imgsz=320,
-        batch=8,
+        epochs=100,
+        imgsz=640,
+        batch=16,
         name="tree_seg",
         seed=RANDOM_SEED,
         patience=10,
