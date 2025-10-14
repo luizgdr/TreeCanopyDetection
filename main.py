@@ -40,7 +40,7 @@ for dir_path in [
 ]:
     Path(dir_path).mkdir(parents=True, exist_ok=True)
 
-# Limit how many images to process during debugging (None for all)
+
 DEBUG_MAX_IMAGES = None
 AUG_PER_IMAGE = 5
 
@@ -48,10 +48,10 @@ RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 
-# Flag to control data prep (set to True to force re-run; False to skip if dataset exists)
-FORCE_REPREP = False  # Change to True if you want to regenerate dataset (e.g., after changing augmentations)
 
-# Check if dataset already prepared
+FORCE_REPREP = False
+
+
 data_yaml_path = os.path.join(DATASET_DIR, "data.yaml")
 if os.path.exists(data_yaml_path) and not FORCE_REPREP:
     print(
@@ -60,28 +60,21 @@ if os.path.exists(data_yaml_path) and not FORCE_REPREP:
 else:
     print("Preparing dataset...")
 
-    # Your original functions (slightly updated for binary tree masks)
     def points_from_segmentation(segmentation: Iterable[float]) -> NDArray[Any]:
         pts = np.array(segmentation, dtype=np.float32).reshape(-1, 2)
         return pts.astype(np.int32)
 
-    def make_mask(
-        shape_hw: tuple[int, int], annotations: list
-    ) -> NDArray[
-        np.uint8
-    ]:  # Changed to uint8 for binary; no class_to_id needed (merge all to tree)
+    def make_mask(shape_hw: tuple[int, int], annotations: list) -> NDArray[np.uint8]:
         h, w = shape_hw
-        mask = np.zeros((h, w), dtype=np.uint8)  # Binary: 0 or 255 for tree
+        mask = np.zeros((h, w), dtype=np.uint8)
 
-        if not annotations:  # Skip if no annotations
+        if not annotations:
             return mask
 
         for ann in annotations:
             segmentation = ann["segmentation"]
             pts = points_from_segmentation(segmentation).reshape(-1, 1, 2)
-            cv2.fillPoly(
-                mask, [pts], 255
-            )  # Fill with 255 for tree (individual or group)
+            cv2.fillPoly(mask, [pts], 255)
 
         return mask
 
@@ -90,8 +83,8 @@ else:
     ) -> NDArray:
         h, w = mask.shape
         color = np.zeros((h, w, 3), dtype=np.uint8)
-        # For binary tree mask, use green
-        color[mask == 255] = [0, 255, 0]  # BGR green
+
+        color[mask == 255] = [0, 255, 0]
         return color
 
     def overlay_mask_on_image_bgr(
@@ -107,7 +100,6 @@ else:
     class_to_id = {"tree": 0}
     id_to_color = {1: (0, 255, 0)}
 
-    # Load annotations
     with open(ANNOTATION_PATH, "r") as file:
         annotation_data = json.load(file)
 
@@ -119,10 +111,8 @@ else:
     def get_annotations_for_image(image_data: dict):
         annotations = image_data.get("annotations", [])
 
-        # Since we are skipping tree groups for now, we are selecting only individual trees
         return [a for a in annotations if a.get("class", "") == "individual_tree"]
 
-    # Convert polygons to YOLO label format (normalized; use JSON width/height)
     def polygons_to_yolo_label(
         image_width: int, image_height: int, annotations: list
     ) -> str:
@@ -190,7 +180,6 @@ else:
         f"Original Train: {len(train_img_data)} images, Val: {len(val_img_data)} images"
     )
 
-    # Your original augmentation transform (updated for binary masks)
     transform = A.Compose(
         [
             A.HorizontalFlip(p=0.5),
@@ -219,7 +208,7 @@ else:
 
             norm_pts = pts / np.array([img_width, img_height])
             norm_pts = norm_pts.flatten()
-            line = f"0 {' '.join(f'{x:.6f}' for x in norm_pts)}"  # Class 0: tree
+            line = f"0 {' '.join(f'{x:.6f}' for x in norm_pts)}"
             lines.append(line)
 
         with open(output_txt_path, "w") as f:
@@ -277,12 +266,12 @@ else:
 
     with open(data_yaml_path, "w") as f:
         f.write(
-            f"""path: {os.path.abspath(DATASET_DIR)}  # Absolute path to dataset
-train: images/train  # Includes originals + aug subdir (Ultralytics will scan recursively)
+            f"""path: {os.path.abspath(DATASET_DIR)}
+train: images/train
 val: images/val
 
-nc: 1  # Number of classes
-names: ['tree']  # Class names
+nc: 1
+names: ['tree']
 """
         )
 
@@ -290,9 +279,9 @@ names: ['tree']  # Class names
 
 print("Data prep complete or skipped. Ready for training/validation/inference.")
 
-# Dataset verification
+
 dataset_dir = Path(DATASET_DIR)
-train_imgs = len(list(dataset_dir.glob("images/train/**/*.jpg")))  # Recursive for aug
+train_imgs = len(list(dataset_dir.glob("images/train/**/*.jpg")))
 val_imgs = len(list(dataset_dir.glob("images/val/*.jpg")))
 train_labels = len(list(dataset_dir.glob("labels/train/**/*.txt")))
 val_labels = len(list(dataset_dir.glob("labels/val/*.txt")))
@@ -314,21 +303,19 @@ else:
 def train_model():
     from ultralytics import YOLO
 
-    # Load a pretrained segmentation model (nano for speed, or 'yolov8m-seg.pt' for better accuracy)
-    model = YOLO("yolov8n-seg.pt")  # Or 'yolov8s-seg.pt' if you have more GPU
+    model = YOLO("yolov8n-seg.pt")
 
-    # Train
     results = model.train(
-        data=data_yaml_path,  # Path to your config
-        epochs=50,  # Start with 50-100; monitor val loss
-        imgsz=320,  # Resize to 640x640 (drone images are often high-res; adjust if needed)
-        batch=8,  # Adjust based on GPU (8-32)
-        name="tree_seg",  # Output folder: runs/segment/tree_seg
+        data=data_yaml_path,
+        epochs=50,
+        imgsz=320,
+        batch=8,
+        name="tree_seg",
         seed=RANDOM_SEED,
-        patience=10,  # Early stopping if no improvement
-        save=True,  # Save checkpoints
-        plots=True,  # Generate training plots
-        device=0 if torch.cuda.is_available() else "cpu",  # Use GPU if available
+        patience=10,
+        save=True,
+        plots=True,
+        device=0 if torch.cuda.is_available() else "cpu",
         workers=2,
     )
 
@@ -349,7 +336,6 @@ def validate_model(model_path: str):
     print(f"Seg mAP@0.5: {metrics.seg.map50}")
     print(f"Seg mAP@0.5:0.95: {metrics.seg.map}")
 
-    # Visualize predictions (saved in runs/segment/val/)
     print("Validation plots saved in runs/segment/val/")
 
 
@@ -358,37 +344,35 @@ def run_inference(model_path: str, source_path: str):
     import cv2
     import numpy as np
     import os
-    from pathlib import Path  # For handling paths
+    from pathlib import Path
 
     if not os.path.exists(source_path):
         print(f"Source path not found: {source_path}. Skipping inference.")
         return
 
-    # Ensure the output directory exists
     output_dir = "runs/segment/generated"
-    os.makedirs(output_dir, exist_ok=True)  # Create if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
 
     model = YOLO(model_path)
 
-    # Predict on the source (file or directory)
     results = model.predict(
-        source=source_path,  # Can be a file or directory
-        save=True,  # Save YOLO's outputs in runs/segment/predict/
-        save_txt=True,  # Save labels
-        save_conf=True,  # Include confidences
-        conf=0.5,  # Confidence threshold
-        iou=0.7,  # IoU threshold
-        imgsz=640,  # Input size
+        source=source_path,
+        save=True,
+        save_txt=True,
+        save_conf=True,
+        conf=0.5,
+        iou=0.7,
+        imgsz=640,
         verbose=True,
         device=0 if torch.cuda.is_available() else "cpu",
     )
 
-    if not isinstance(results, list):  # Single file or list for directory
+    if not isinstance(results, list):
         print("No results to process. Ensure the source path is valid.")
         return
 
     for idx, result in enumerate(results):
-        img_path = result.path  # Path of the processed image
+        img_path = result.path
         try:
             orig_img = cv2.imread(img_path)
             if orig_img is None:
@@ -400,32 +384,25 @@ def run_inference(model_path: str, source_path: str):
                 f"Processing image: {os.path.basename(img_path)} with size: {orig_w}x{orig_h}"
             )
 
-            masks = result.masks.data  # type: ignore # Masks for this image
+            masks = result.masks.data  # type: ignore
             if masks is not None and len(masks) > 0:
-                combined_mask = np.zeros(
-                    (orig_h, orig_w), dtype=np.uint8
-                )  # Initialize combined mask
+                combined_mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
 
                 total_tree_pixels = 0
                 for i, mask in enumerate(masks):
-                    tree_mask = mask.cpu().numpy().astype(np.uint8)  # Shape: (640, 640)
+                    tree_mask = mask.cpu().numpy().astype(np.uint8)
 
-                    # Resize mask to original image size
                     tree_mask_resized = cv2.resize(
                         tree_mask, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR
-                    ).astype(
-                        np.uint8
-                    )  # Binary: 0 or 1
+                    ).astype(np.uint8)
 
-                    # Combine masks
                     combined_mask = cv2.bitwise_or(
                         combined_mask, tree_mask_resized * 255
-                    )  # 255 for trees
+                    )
 
                     tree_pixels = np.sum(tree_mask_resized > 0)
                     total_tree_pixels += tree_pixels
 
-                    # Print per-tree stats
                     if result.boxes is not None and i < len(result.boxes.conf):
                         conf = result.boxes.conf[i].item()
                         print(
@@ -436,7 +413,6 @@ def run_inference(model_path: str, source_path: str):
                             f"Tree {i} in {os.path.basename(img_path)}: Canopy area = {tree_pixels} pixels"
                         )
 
-                # Save the combined mask in the new directory
                 base_name = Path(img_path).stem
                 combined_mask_path = os.path.join(
                     output_dir, f"{base_name}_combined_mask.png"
@@ -444,20 +420,16 @@ def run_inference(model_path: str, source_path: str):
                 cv2.imwrite(combined_mask_path, combined_mask)
                 print(f"Saved combined mask for {base_name} at {combined_mask_path}")
 
-                # Create semi-transparent overlay
-                overlay = orig_img.copy()  # Original image (3-channel BGR)
-                overlay_bgra = cv2.cvtColor(
-                    overlay, cv2.COLOR_BGR2BGRA
-                )  # Convert to BGRA
-                tree_areas = combined_mask > 0  # Boolean for trees
+                overlay = orig_img.copy()
+                overlay_bgra = cv2.cvtColor(overlay, cv2.COLOR_BGR2BGRA)
+                tree_areas = combined_mask > 0
                 overlay_bgra[tree_areas] = [
                     0,
                     255,
                     0,
                     128,
-                ]  # Semi-transparent green (50% alpha)
+                ]
 
-                # Save the semi-transparent overlay in the new directory
                 overlay_path = os.path.join(
                     output_dir, f"{base_name}_semi_transparent_overlay.png"
                 )
@@ -471,7 +443,7 @@ def run_inference(model_path: str, source_path: str):
                     f"Total tree canopy coverage for {base_name}: {canopy_coverage:.2f}%"
                 )
 
-            polygons = result.masks.xy  # type: ignore # List of polygons
+            polygons = result.masks.xy  # type: ignore
             for i, poly in enumerate(polygons):
                 if len(poly) > 0:
                     poly_area = cv2.contourArea(poly.astype(np.int32))
