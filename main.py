@@ -305,7 +305,7 @@ def train_model():
 
     model = YOLO("yolov8n-seg.pt")
 
-    results = model.train(
+    model.train(
         data=data_yaml_path,
         epochs=50,
         imgsz=320,
