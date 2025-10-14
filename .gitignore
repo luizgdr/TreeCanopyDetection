@@ -1,2 +1,4 @@
 *.zip
-data/images/
+data/*
+__pycache__
+runs
