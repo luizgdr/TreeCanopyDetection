@@ -1,3 +1,4 @@
+from pathlib import Path
 import sys
 import os
 import subprocess
@@ -40,8 +41,7 @@ def main():
         print(f"    source {VENV_NAME}/bin/activate")
 
     print("Generating initial folders")
-    os.mkdir("data")
-    os.mkdir("data/images")
+    Path("data/images").mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == "__main__":

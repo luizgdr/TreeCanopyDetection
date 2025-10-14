@@ -10,6 +10,11 @@ from typing import Any, Dict, Iterable
 from numpy.typing import NDArray
 from sklearn.model_selection import train_test_split
 import torch
+import cv2
+import numpy as np
+import os
+from pathlib import Path
+from ultralytics import YOLO # pyright: ignore[reportPrivateImportUsage]
 
 DATA_DIR = "data"
 IMG_DIR = os.path.join(DATA_DIR, "images")
@@ -301,8 +306,6 @@ else:
 
 
 def train_model():
-    from ultralytics import YOLO
-
     model = YOLO("yolov8n-seg.pt")
 
     model.train(
@@ -326,8 +329,6 @@ def train_model():
 
 
 def validate_model(model_path: str):
-    from ultralytics import YOLO
-
     model = YOLO(model_path)
     metrics = model.val(data=data_yaml_path)
     print(f"Validation Results:")
@@ -340,12 +341,6 @@ def validate_model(model_path: str):
 
 
 def run_inference(model_path: str, source_path: str):
-    from ultralytics import YOLO
-    import cv2
-    import numpy as np
-    import os
-    from pathlib import Path
-
     if not os.path.exists(source_path):
         print(f"Source path not found: {source_path}. Skipping inference.")
         return
@@ -460,8 +455,6 @@ def run_inference(model_path: str, source_path: str):
 
 
 def export_model(model_path: str, format_type: str = "onnx"):
-    from ultralytics import YOLO
-
     model = YOLO(model_path)
     exported_path = model.export(format=format_type)
     print(f"Model exported to: {exported_path}")
