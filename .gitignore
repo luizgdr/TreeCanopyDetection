@@ -1,5 +1,5 @@
 *.zip
 data/*
 __pycache__
-runs\
+runs/*
 .venv
