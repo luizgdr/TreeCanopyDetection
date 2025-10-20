@@ -3,10 +3,9 @@ import os
 import shutil
 import cv2
 import numpy as np
-import albumentations as A
 import random
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Iterable
 from numpy.typing import NDArray
 from sklearn.model_selection import train_test_split
 import torch
@@ -14,302 +13,242 @@ import cv2
 import numpy as np
 import os
 from pathlib import Path
-from ultralytics import YOLO # pyright: ignore[reportPrivateImportUsage]
-
-DATA_DIR = "data"
-IMG_DIR = os.path.join(DATA_DIR, "images")
-ANNOTATION_PATH = os.path.join(DATA_DIR, "train_annotations.json")
-OUT_MASK_DIR = os.path.join(DATA_DIR, "masks")
-AUG_IMG_DIR = os.path.join(DATA_DIR, "augmented", "images")
-AUG_MSK_DIR = os.path.join(DATA_DIR, "augmented", "masks")
-DATASET_DIR = os.path.join(DATA_DIR, "yolo_dataset")
-IMG_TRAIN_DIR = os.path.join(DATASET_DIR, "images", "train")
-IMG_VAL_DIR = os.path.join(DATASET_DIR, "images", "val")
-LABEL_TRAIN_DIR = os.path.join(DATASET_DIR, "labels", "train")
-LABEL_VAL_DIR = os.path.join(DATASET_DIR, "labels", "val")
-AUG_TRAIN_IMG_DIR = os.path.join(DATASET_DIR, "images", "train", "aug")
-AUG_TRAIN_LABEL_DIR = os.path.join(DATASET_DIR, "labels", "train", "aug")
-AUG_TRAIN_MSK_DIR = os.path.join(DATASET_DIR, "masks", "train", "aug")
-
-for dir_path in [
-    OUT_MASK_DIR,
-    AUG_IMG_DIR,
-    AUG_MSK_DIR,
-    IMG_TRAIN_DIR,
-    IMG_VAL_DIR,
-    LABEL_TRAIN_DIR,
-    LABEL_VAL_DIR,
-    AUG_TRAIN_IMG_DIR,
-    AUG_TRAIN_LABEL_DIR,
-    AUG_TRAIN_MSK_DIR,
-]:
-    Path(dir_path).mkdir(parents=True, exist_ok=True)
+from ultralytics import YOLO  # pyright: ignore[reportPrivateImportUsage]
 
 
-DEBUG_MAX_IMAGES = None
-AUG_PER_IMAGE = 5
+def prep_dataset():
+    if os.path.exists(DATA_YAML_PATH) and not FORCE_REPREP:
+        print(
+            "Dataset already exists! Skipping data preparation. Set FORCE_REPREP=True to regenerate."
+        )
+    else:
+        print("Preparing dataset...")
 
-RANDOM_SEED = 42
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
+        def points_from_segmentation(segmentation: Iterable[float]) -> NDArray[Any]:
+            pts = np.array(segmentation, dtype=np.float32).reshape(-1, 2)
+            return pts.astype(np.int32)
 
+        def make_mask(
+            shape_hw: tuple[int, int], annotations: list
+        ) -> NDArray[np.uint8]:
+            h, w = shape_hw
+            mask = np.zeros((h, w), dtype=np.uint8)
 
-FORCE_REPREP = False
+            if not annotations:
+                return mask
 
+            for ann in annotations:
+                segmentation = ann["segmentation"]
+                pts = points_from_segmentation(segmentation).reshape(-1, 1, 2)
+                cv2.fillPoly(mask, [pts], 255)
 
-data_yaml_path = os.path.join(DATASET_DIR, "data.yaml")
-if os.path.exists(data_yaml_path) and not FORCE_REPREP:
-    print(
-        "Dataset already exists! Skipping data preparation. Set FORCE_REPREP=True to regenerate."
-    )
-else:
-    print("Preparing dataset...")
-
-    def points_from_segmentation(segmentation: Iterable[float]) -> NDArray[Any]:
-        pts = np.array(segmentation, dtype=np.float32).reshape(-1, 2)
-        return pts.astype(np.int32)
-
-    def make_mask(shape_hw: tuple[int, int], annotations: list) -> NDArray[np.uint8]:
-        h, w = shape_hw
-        mask = np.zeros((h, w), dtype=np.uint8)
-
-        if not annotations:
             return mask
 
-        for ann in annotations:
-            segmentation = ann["segmentation"]
-            pts = points_from_segmentation(segmentation).reshape(-1, 1, 2)
-            cv2.fillPoly(mask, [pts], 255)
+        with open(ANNOTATION_PATH, "r") as file:
+            annotation_data = json.load(file)
 
-        return mask
+        images_list = annotation_data["images"]
+        train_img_data, val_img_data = train_test_split(
+            images_list, test_size=0.2, random_state=RANDOM_SEED
+        )
 
-    def colorize_mask(
-        mask: NDArray, id_to_color: Dict[int, tuple[int, int, int]]
-    ) -> NDArray:
-        h, w = mask.shape
-        color = np.zeros((h, w, 3), dtype=np.uint8)
+        def get_annotations_for_image(image_data: dict):
+            return image_data.get("annotations", [])
 
-        color[mask == 255] = [0, 255, 0]
-        return color
+        def polygons_to_yolo_label(
+            image_width: int, image_height: int, annotations: list
+        ) -> str:
+            lines = []
+            if not annotations:
+                return ""
 
-    def overlay_mask_on_image_bgr(
-        img_bgr: NDArray,
-        mask: NDArray,
-        id_to_color: Dict[int, tuple[int, int, int]],
-        alpha: float = 0.4,
-    ) -> NDArray:
-        color_mask_bgr = colorize_mask(mask, id_to_color)
-        overlay = cv2.addWeighted(img_bgr, 1.0, color_mask_bgr, alpha, 0)
-        return overlay
+            for ann in annotations:
+                if ann["class"] == "individual_tree":
+                    cls_id = 0
+                elif ann["class"] == "group_of_trees":
+                    cls_id = 1
+                else:
+                    continue
 
-    class_to_id = {"tree": 0}
-    id_to_color = {1: (0, 255, 0)}
+                segmentation = ann["segmentation"]
+                pts = np.array(segmentation, dtype=np.float32).reshape(-1, 2)
 
-    with open(ANNOTATION_PATH, "r") as file:
-        annotation_data = json.load(file)
+                norm_pts = pts / np.array([image_width, image_height])
+                norm_pts = norm_pts.flatten()
 
-    images_list = annotation_data["images"]
-    train_img_data, val_img_data = train_test_split(
-        images_list, test_size=0.2, random_state=RANDOM_SEED
-    )
+                line = f"{cls_id} {' '.join(f'{x:.6f}' for x in norm_pts)}"
+                lines.append(line)
 
-    def get_annotations_for_image(image_data: dict):
-        annotations = image_data.get("annotations", [])
+            return "\n".join(lines)
 
-        return [a for a in annotations if a.get("class", "") == "individual_tree"]
+        def process_split(
+            img_data_list: list,
+            img_out_dir: str,
+            label_out_dir: str,
+            is_train: bool = False,
+        ):
+            processed_count = 0
+            for image_data in img_data_list:
+                file_name = image_data["file_name"]
+                file_path = os.path.join(IMG_DIR, file_name)
+                img_bgr = cv2.imread(file_path)
+                if img_bgr is None:
+                    print(f"Warning: Could not load {file_name}")
+                    continue
 
-    def polygons_to_yolo_label(
-        image_width: int, image_height: int, annotations: list
-    ) -> str:
-        lines = []
-        if not annotations:
-            return ""
+                h = image_data["height"]
+                w = image_data["width"]
+                annotations = get_annotations_for_image(image_data)
 
-        for ann in annotations:
-            cls_id = 0
-            segmentation = ann["segmentation"]
-            pts = np.array(segmentation, dtype=np.float32).reshape(-1, 2)
+                base_name = Path(file_name).stem
+                img_out_path = os.path.join(img_out_dir, f"{base_name}.jpg")
+                cv2.imwrite(img_out_path, img_bgr)
 
-            norm_pts = pts / np.array([image_width, image_height])
-            norm_pts = norm_pts.flatten()
+                label_content = polygons_to_yolo_label(w, h, annotations)
+                label_out_path = os.path.join(label_out_dir, f"{base_name}.txt")
+                with open(label_out_path, "w") as f:
+                    f.write(label_content)
 
-            line = f"{cls_id} {' '.join(f'{x:.6f}' for x in norm_pts)}"
-            lines.append(line)
+                mask = make_mask((h, w), annotations)
+                mask_path = os.path.join(OUT_MASK_DIR, f"{base_name}.png")
+                cv2.imwrite(mask_path, mask)
 
-        return "\n".join(lines)
+                processed_count += 1
+                if DEBUG_MAX_IMAGES is not None and processed_count >= DEBUG_MAX_IMAGES:
+                    break
 
-    def process_split(
-        img_data_list: list,
-        img_out_dir: str,
-        label_out_dir: str,
-        is_train: bool = False,
-    ):
-        processed_count = 0
-        for image_data in img_data_list:
-            file_name = image_data["file_name"]
-            file_path = os.path.join(IMG_DIR, file_name)
-            img_bgr = cv2.imread(file_path)
-            if img_bgr is None:
-                print(f"Warning: Could not load {file_name}")
-                continue
+            print(
+                f"Processed {len(img_data_list)} images for {'train' if is_train else 'val'} split."
+            )
 
-            h = image_data["height"]
-            w = image_data["width"]
-            annotations = get_annotations_for_image(image_data)
-
-            base_name = Path(file_name).stem
-            img_out_path = os.path.join(img_out_dir, f"{base_name}.jpg")
-            cv2.imwrite(img_out_path, img_bgr)
-
-            label_content = polygons_to_yolo_label(w, h, annotations)
-            label_out_path = os.path.join(label_out_dir, f"{base_name}.txt")
-            with open(label_out_path, "w") as f:
-                f.write(label_content)
-
-            mask = make_mask((h, w), annotations)
-            mask_path = os.path.join(OUT_MASK_DIR, f"{base_name}.png")
-            cv2.imwrite(mask_path, mask)
-
-            processed_count += 1
-            if DEBUG_MAX_IMAGES is not None and processed_count >= DEBUG_MAX_IMAGES:
-                break
+        process_split(train_img_data, IMG_TRAIN_DIR, LABEL_TRAIN_DIR, is_train=True)
+        process_split(val_img_data, IMG_VAL_DIR, LABEL_VAL_DIR, is_train=False)
 
         print(
-            f"Processed {len(img_data_list)} images for {'train' if is_train else 'val'} split."
+            f"Original Train: {len(train_img_data)} images, Val: {len(val_img_data)} images"
         )
 
-    process_split(train_img_data, IMG_TRAIN_DIR, LABEL_TRAIN_DIR, is_train=True)
-    process_split(val_img_data, IMG_VAL_DIR, LABEL_VAL_DIR, is_train=False)
+        processed = 0
+        aug_count = 0
+        for image_data in train_img_data:
+            file_name = image_data["file_name"]
+            file_path = os.path.join(IMG_DIR, file_name)
+            img_bgr = cv2.imread(file_path, cv2.IMREAD_COLOR)
 
-    print(
-        f"Original Train: {len(train_img_data)} images, Val: {len(val_img_data)} images"
-    )
-
-    transform = A.Compose(
-        [
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.1),
-            A.RandomRotate90(p=0.3),
-            A.RandomBrightnessContrast(p=0.2),
-        ]
-    )
-
-    def raster_mask_to_yolo_polygons(
-        mask_path: str, img_width: int, img_height: int, output_txt_path: str
-    ):
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            return
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        lines = []
-        for contour in contours:
-            if cv2.contourArea(contour) < 100:
+            if img_bgr is None:
                 continue
 
-            pts = contour.squeeze().astype(np.float32)
-            if len(pts) < 3:
-                continue
+            h, w = img_bgr.shape[:2]
+            annotations = get_annotations_for_image(image_data)
+            mask = make_mask((h, w), annotations)
 
-            norm_pts = pts / np.array([img_width, img_height])
-            norm_pts = norm_pts.flatten()
-            line = f"0 {' '.join(f'{x:.6f}' for x in norm_pts)}"
-            lines.append(line)
+            base_name = Path(file_name).stem
 
-        with open(output_txt_path, "w") as f:
-            f.write("\n".join(lines))
+            base_mask_path = os.path.join(OUT_MASK_DIR, f"{base_name}.png")
+            cv2.imwrite(base_mask_path, mask)
 
-    processed = 0
-    aug_count = 0
-    for image_data in train_img_data:
-        file_name = image_data["file_name"]
-        file_path = os.path.join(IMG_DIR, file_name)
-        img_bgr = cv2.imread(file_path, cv2.IMREAD_COLOR)
+            quadrants = [
+                (0, h // 2, 0, w // 2, "top_left"),
+                (0, h // 2, w // 2, w, "top_right"),
+                (h // 2, h, 0, w // 2, "bottom_left"),
+                (h // 2, h, w // 2, w, "bottom_right"),
+            ]
 
-        if img_bgr is None:
-            continue
+            for i, (y_start, y_end, x_start, x_end, quad_name) in enumerate(quadrants):
+                quad_img = img_bgr[y_start:y_end, x_start:x_end]
+                quad_h, quad_w = quad_img.shape[:2]
 
-        h = image_data["height"]
-        w = image_data["width"]
-        annotations = get_annotations_for_image(image_data)
-        mask = make_mask((h, w), annotations)
+                quad_mask = mask[y_start:y_end, x_start:x_end]
 
-        base_name = Path(file_name).stem
+                quad_annotations = []
+                for ann in annotations:
+                    segmentation = ann["segmentation"]
+                    pts = np.array(segmentation, dtype=np.float32).reshape(-1, 2)
 
-        base_mask_path = os.path.join(OUT_MASK_DIR, f"{base_name}.png")
-        cv2.imwrite(base_mask_path, mask)
+                    pts[:, 0] -= x_start
+                    pts[:, 1] -= y_start
 
-        for i in range(AUG_PER_IMAGE):
-            out = transform(image=img_bgr, mask=mask)
-            aug_img_bgr = out["image"]
-            aug_msk = out["mask"]
+                    pts[:, 0] = np.clip(pts[:, 0], 0, quad_w)
+                    pts[:, 1] = np.clip(pts[:, 1], 0, quad_h)
 
-            aug_img_out_path = os.path.join(
-                AUG_TRAIN_IMG_DIR, f"{base_name}_aug_{i:02d}.jpg"
+                    if len(pts) > 2 and np.any(
+                        (pts[:, 0] >= 0)
+                        & (pts[:, 0] <= quad_w)
+                        & (pts[:, 1] >= 0)
+                        & (pts[:, 1] <= quad_h)
+                    ):
+                        adjusted_ann = ann.copy()
+                        adjusted_ann["segmentation"] = pts.flatten().tolist()
+                        quad_annotations.append(adjusted_ann)
+
+                aug_img_out_path = os.path.join(
+                    AUG_TRAIN_IMG_DIR, f"{base_name}_quad_{quad_name}.jpg"
+                )
+                cv2.imwrite(aug_img_out_path, quad_img)
+
+                aug_msk_out_path = os.path.join(
+                    AUG_TRAIN_MSK_DIR, f"{base_name}_quad_{quad_name}.png"
+                )
+                cv2.imwrite(aug_msk_out_path, quad_mask)
+
+                aug_label_out_path = os.path.join(
+                    AUG_TRAIN_LABEL_DIR, f"{base_name}_quad_{quad_name}.txt"
+                )
+                label_content = polygons_to_yolo_label(quad_w, quad_h, quad_annotations)
+                with open(aug_label_out_path, "w") as f:
+                    f.write(label_content)
+
+                aug_count += 1
+
+            processed += 1
+            if DEBUG_MAX_IMAGES is not None and processed >= DEBUG_MAX_IMAGES:
+                break
+
+        print(f"Generated {aug_count} quadrant samples for train.")
+
+        shutil.rmtree(AUG_TRAIN_MSK_DIR)
+        print("Temp augmented masks cleaned up.")
+
+        with open(DATA_YAML_PATH, "w") as f:
+            f.write(
+                f"path: {os.path.abspath(DATASET_DIR)}\n"
+                + "train: images/train\n"
+                + "val: images/val\n\n"
+                + "nc: 2\n"
+                + "names: ['individual_tree', 'group_of_trees']\n"
             )
-            aug_msk_out_path = os.path.join(
-                AUG_TRAIN_MSK_DIR, f"{base_name}_aug_{i:02d}.png"
-            )
-            cv2.imwrite(aug_img_out_path, aug_img_bgr)
-            cv2.imwrite(aug_msk_out_path, aug_msk)
 
-            aug_label_out_path = os.path.join(
-                AUG_TRAIN_LABEL_DIR, f"{base_name}_aug_{i:02d}.txt"
-            )
-            raster_mask_to_yolo_polygons(aug_msk_out_path, w, h, aug_label_out_path)
+        print(f"data.yaml created at: {DATA_YAML_PATH}")
 
-            aug_count += 1
-
-        processed += 1
-        if DEBUG_MAX_IMAGES is not None and processed >= DEBUG_MAX_IMAGES:
-            break
-
-    print(f"Generated {aug_count} augmented samples for train.")
-
-    shutil.rmtree(AUG_TRAIN_MSK_DIR)
-    print("Temp augmented masks cleaned up.")
-
-    with open(data_yaml_path, "w") as f:
-        f.write(
-            f"""path: {os.path.abspath(DATASET_DIR)}
-train: images/train
-val: images/val
-
-nc: 1
-names: ['tree']
-"""
-        )
-
-    print(f"data.yaml created at: {data_yaml_path}")
-
-print("Data prep complete or skipped. Ready for training/validation/inference.")
+    print("Data prep complete or skipped. Ready for training/validation/inference.")
 
 
-dataset_dir = Path(DATASET_DIR)
-train_imgs = len(list(dataset_dir.glob("images/train/**/*.jpg")))
-val_imgs = len(list(dataset_dir.glob("images/val/*.jpg")))
-train_labels = len(list(dataset_dir.glob("labels/train/**/*.txt")))
-val_labels = len(list(dataset_dir.glob("labels/val/*.txt")))
+def validate_dataset():
+    dataset_dir = Path(DATASET_DIR)
+    train_imgs = len(list(dataset_dir.glob("images/train/**/*.jpg")))
+    val_imgs = len(list(dataset_dir.glob("images/val/*.jpg")))
+    train_labels = len(list(dataset_dir.glob("labels/train/**/*.txt")))
+    val_labels = len(list(dataset_dir.glob("labels/val/*.txt")))
 
-print(f"Train images: {train_imgs}")
-print(f"Val images: {val_imgs}")
-print(f"Train labels: {train_labels}")
-print(f"Val labels: {val_labels}")
+    print(f"Train images: {train_imgs}")
+    print(f"Val images: {val_imgs}")
+    print(f"Train labels: {train_labels}")
+    print(f"Val labels: {val_labels}")
 
-sample_label = next(dataset_dir.glob("labels/train/*.txt"), None)
-if sample_label:
-    with open(sample_label) as f:
-        content = f.read()
-    print(f"Sample label content: {content[:100]}...")
-else:
-    print("No sample label found—check paths!")
+    sample_label = next(dataset_dir.glob("labels/train/*.txt"), None)
+    if sample_label:
+        with open(sample_label) as f:
+            content = f.read()
+        print(f"Sample label content: {content[:100]}...")
+    else:
+        print("No sample label found—check paths!")
 
 
 def train_model():
     model = YOLO("yolov8n-seg.pt")
 
     model.train(
-        data=data_yaml_path,
+        data=DATA_YAML_PATH,
         epochs=100,
         imgsz=640,
         batch=16,
@@ -330,7 +269,7 @@ def train_model():
 
 def validate_model(model_path: str):
     model = YOLO(model_path)
-    metrics = model.val(data=data_yaml_path)
+    metrics = model.val(data=DATA_YAML_PATH)
     print(f"Validation Results:")
     print(f"Box mAP@0.5: {metrics.box.map50}")
     print(f"Box mAP@0.5:0.95: {metrics.box.map}")
@@ -368,6 +307,7 @@ def run_inference(model_path: str, source_path: str):
 
     for idx, result in enumerate(results):
         img_path = result.path
+        base_name = Path(img_path).stem
         try:
             orig_img = cv2.imread(img_path)
             if orig_img is None:
@@ -408,7 +348,6 @@ def run_inference(model_path: str, source_path: str):
                             f"Tree {i} in {os.path.basename(img_path)}: Canopy area = {tree_pixels} pixels"
                         )
 
-                base_name = Path(img_path).stem
                 combined_mask_path = os.path.join(
                     output_dir, f"{base_name}_combined_mask.png"
                 )
@@ -461,8 +400,53 @@ def export_model(model_path: str, format_type: str = "onnx"):
     return exported_path
 
 
-if __name__ == "__main__":
-    model = train_model()
+DATA_DIR = "data"
+IMG_DIR = os.path.join(DATA_DIR, "images")
+OUT_MASK_DIR = os.path.join(DATA_DIR, "masks")
+AUG_IMG_DIR = os.path.join(DATA_DIR, "augmented", "images")
+AUG_MSK_DIR = os.path.join(DATA_DIR, "augmented", "masks")
+DATASET_DIR = os.path.join(DATA_DIR, "yolo_dataset")
+IMG_TRAIN_DIR = os.path.join(DATASET_DIR, "images", "train")
+IMG_VAL_DIR = os.path.join(DATASET_DIR, "images", "val")
+LABEL_TRAIN_DIR = os.path.join(DATASET_DIR, "labels", "train")
+LABEL_VAL_DIR = os.path.join(DATASET_DIR, "labels", "val")
+AUG_TRAIN_IMG_DIR = os.path.join(DATASET_DIR, "images", "train", "aug")
+AUG_TRAIN_LABEL_DIR = os.path.join(DATASET_DIR, "labels", "train", "aug")
+AUG_TRAIN_MSK_DIR = os.path.join(DATASET_DIR, "masks", "train", "aug")
+
+for dir_path in [
+    DATA_DIR,
+    IMG_DIR,
+    OUT_MASK_DIR,
+    AUG_IMG_DIR,
+    AUG_MSK_DIR,
+    DATASET_DIR,
+    IMG_TRAIN_DIR,
+    IMG_VAL_DIR,
+    LABEL_TRAIN_DIR,
+    LABEL_VAL_DIR,
+    AUG_TRAIN_IMG_DIR,
+    AUG_TRAIN_LABEL_DIR,
+    AUG_TRAIN_MSK_DIR,
+]:
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+ANNOTATION_PATH = os.path.join(DATA_DIR, "train_annotations.json")
+DATA_YAML_PATH = os.path.join(DATASET_DIR, "data.yaml")
+
+RANDOM_SEED = 42
+FORCE_REPREP = False
+DEBUG_MAX_IMAGES = None
+
+random.seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+
+
+def main():
+    prep_dataset()
+    validate_dataset()
+
+    train_model()
 
     validate_model("runs/segment/tree_seg/weights/best.pt")
 
@@ -474,3 +458,7 @@ if __name__ == "__main__":
     exported_path = export_model("runs/segment/tree_seg/weights/best.pt", "onnx")
 
     print(f"Exported model to path '{exported_path}'")
+
+
+if __name__ == "__main__":
+    main()
