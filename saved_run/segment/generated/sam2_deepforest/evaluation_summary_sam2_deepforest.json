@@ -1,0 +1,12 @@
+{
+    "per_class_iou": {
+        "individual_tree": 0.2648574484326271
+    },
+    "per_class_ap_iou_0_4": {
+        "individual_tree": 0.26598590704279207
+    },
+    "overall": {
+        "mean_iou": 0.2648574484326271,
+        "mean_ap": 0.26598590704279207
+    }
+}

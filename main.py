@@ -278,7 +278,6 @@ def train_model():
         imgsz=1024,
         batch=2,
         name="tree_seg",
-        accumulate=4,
         seed=RANDOM_SEED,
         patience=10,
         save=True,
